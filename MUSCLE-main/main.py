@@ -5,11 +5,7 @@ import torch.optim as optim
 from torch.utils import data
 from tqdm import tqdm
 
-# ==================== 修改 1: 导入语句 ====================
-# 将导入类名从 TSSGCF, TSSGCF_wo_Text 换成 MVSF, MVSF_wo_Text
-# 并将模块名从 tssgcf 换成 MVSF
 from MUSCLE import MUSCLE, bpr_loss, cross_modal_contrastive_loss
-# ==========================================================
 
 from processing import get_sim_matrix, get_bert_emb, get_train_mapping, get_test_mapping, compute_full_sim_matrix
 from utils import build_interaction_adj, TrnData
@@ -24,31 +20,20 @@ for i in range(956):
     api_mapping[i] = 0
 
 if __name__ == "__main__":
-    # ==================== 统一超参数配置控制台 ====================
-    # 1. 数据集基础信息
     num_mashups = 2289
     num_apis = 956
-
-    # 2. 模型结构参数
-    emb_dim = 256  # 节点嵌入维度
-    n_layers = 5  # LightGCN 的传播层数 L
-
-    # 3. 训练与优化参数
-    epochs = 500  # 训练轮数
-    batch_size = 256  # 批次大小
-    lr = 1e-4  # Adam 优化器学习率
-    weight_decay = 1e-4  # Adam 优化器权重衰减
-    l2_reg_weight = 1e-5  # BPR Loss 后的自定义 L2 正则化系数 (即原来的 0.00001)
-
-    # 4. 创新点模块参数 (对比学习)
-    cl_weight = 0  # 跨模态对比学习权重
-    cl_temperature = 0.2  # InfoNCE 温度系数
-    sel_cl_weight = 0  # 选择性图对比学习权重
-    top_ratio = 0  # 头部节点截断比例
-
-    # 5. 测试评估参数
-    top_k = 5  # 评估指标 Recall@K, NDCG@K, Precision@K 中的 K
-    # =========================================================================
+    emb_dim = 256  
+    n_layers = 5 
+    epochs = 500  
+    batch_size = 256 
+    lr = 1e-4 
+    weight_decay = 1e-4
+    l2_reg_weight = 1e-5
+    cl_weight = 0 
+    cl_temperature = 0.2
+    sel_cl_weight = 0 
+    top_ratio = 0 
+    top_k = 5 
 
     mashup_des_emb, api_des_emb = get_bert_emb()
     mashup_sim_matrix, api_sim_matrix = get_sim_matrix(mashup_des_emb, api_des_emb)
@@ -64,8 +49,6 @@ if __name__ == "__main__":
     interaction_adj = build_interaction_adj(train)
     train_csr = (train != 0).astype(np.float32)
 
-    # ==================== 新增：计算出度数排名前 20% 的节点 ====================
-    # 统计每个 Mashup 和 API 的度
     mashup_degrees = np.array(train.sum(axis=1)).squeeze()
     api_degrees = np.array(train.sum(axis=0)).squeeze()
 
@@ -74,9 +57,7 @@ if __name__ == "__main__":
 
     top_mashups = torch.LongTensor(np.argsort(mashup_degrees)[::-1][:top_m_cutoff].copy()).to(device)
     top_apis = torch.LongTensor(np.argsort(api_degrees)[::-1][:top_a_cutoff].copy()).to(device)
-    # =========================================================================
 
-    # normalizing the adj matrix
     rowD = np.array(train.sum(1)).squeeze()
     colD = np.array(train.sum(0)).squeeze()
     for i in range(len(train.data)):
@@ -130,7 +111,6 @@ if __name__ == "__main__":
             for param in model.parameters():
                 l2_reg += torch.norm(param) ** 2
 
-            # ==================== 使用变量替换原来写死的 0.00001 ====================
             loss = loss_bpr + cl_weight * loss_cl + sel_cl_weight * loss_sel_cl + l2_reg_weight * l2_reg
             loss.backward()
             optimizer.step()
@@ -148,7 +128,6 @@ if __name__ == "__main__":
 
                 test_uids_input = torch.LongTensor(test_uids[start:end])
 
-                # ==================== 将 top_k 参数传给模型 ====================
                 recall, precision, ndcg = model.pred(
                     mashup_sim_matrix, api_sim_matrix, interaction_adj,
                     mashup_des_emb, api_des_emb, test_uids_input,
@@ -167,6 +146,5 @@ if __name__ == "__main__":
             if Recall > best_recall:
                 best_recall = Recall
                 print(f"--> [Model Saved] New best Recall score: {best_recall:.4f} at epoch {epoch}")
-                # 保存模型的权重参数 (State Dict)
                 torch.save(model.state_dict(), 'best_muscle_model.pth')
             print("TEST   EPOCH:", epoch, " Recall: ", Recall, " NDCG: ", NDCG, " Precision: ", Precision, " F1: ", F1)
