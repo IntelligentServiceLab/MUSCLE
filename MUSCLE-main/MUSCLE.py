@@ -10,7 +10,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 def dcg_at_k(scores, k):
-    """计算 DCG@k"""
+    """DCG@k"""
     scores = np.asarray(scores, dtype=float)[:k]
     if scores.size == 0:
         return 0.0
@@ -18,16 +18,14 @@ def dcg_at_k(scores, k):
 
 
 def ndcg_at_k(predicted_scores, true_scores, k):
-    """计算 NDCG@k"""
+    """ NDCG@k"""
     sorted_true_scores = [true for _, true in sorted(zip(predicted_scores, true_scores), reverse=True)]
     dcg = dcg_at_k(sorted_true_scores, k)
     idcg = dcg_at_k(sorted(true_scores, reverse=True), k)
     return dcg / idcg if idcg > 0 else 0.0
 
 
-# ------------------------- 模型定义 -------------------------
 class LightGCN(nn.Module):
-    """处理Mashup-Mashup和API-API同构图的LightGCN"""
 
     def __init__(self, emb_dim=64, n_layers=3):
         super().__init__()
@@ -35,23 +33,19 @@ class LightGCN(nn.Module):
         self.to(device)
 
     def forward(self, adj_mashup, adj_api, mashup_emb, api_emb):
-        # 确保邻接矩阵与嵌入在同一设备
         adj_mashup = adj_mashup.to(mashup_emb.device)
         adj_api = adj_api.to(api_emb.device)
 
-        # Mashup图传播
         mashup_emb_layers = [mashup_emb]
         for _ in range(self.n_layers):
             mashup_emb = torch.sparse.mm(adj_mashup, mashup_emb_layers[-1])
             mashup_emb_layers.append(mashup_emb)
 
-        # API图传播
         api_emb_layers = [api_emb]
         for _ in range(self.n_layers):
             api_emb = torch.sparse.mm(adj_api, api_emb_layers[-1])
             api_emb_layers.append(api_emb)
 
-        # 多阶平均
         final_mashup = torch.mean(torch.stack(mashup_emb_layers), dim=0)
         final_api = torch.mean(torch.stack(api_emb_layers), dim=0)
         final_mashup = F.normalize(final_mashup, p=2, dim=1)
@@ -61,9 +55,6 @@ class LightGCN(nn.Module):
 
 
 class MUSCLE(nn.Module):
-    """
-    我们将 TSSGCF 痕迹全面替换为 MVSF (Multi-View Semantic Fusion)
-    """
 
     def __init__(self, num_mashups, num_apis, emb_dim, n_layers):
         super().__init__()
@@ -72,13 +63,11 @@ class MUSCLE(nn.Module):
         self.emb_dim = emb_dim
         self.n_layers = n_layers
 
-        # 【修复1】：找回被我弄丢的图节点 Embedding 初始化
         self.mashup_emb = nn.Embedding(num_mashups, emb_dim).to(device)
         self.api_emb = nn.Embedding(num_apis, emb_dim).to(device)
 
         self.lightgcn = LightGCN(emb_dim, n_layers)
 
-        # 【修复2】：恢复你原本正确的 384 维度 MLP
         self.text_mlp = nn.Sequential(
             nn.Linear(384, emb_dim),
         ).to(device)
@@ -92,34 +81,27 @@ class MUSCLE(nn.Module):
         return torch.mean(torch.stack(all_emb), dim=0)
 
     def forward(self, adj_mashup, adj_api, interaction_adj, mashup_text_emb, api_text_emb):
-        # 确保输入文本嵌入在正确设备
         mashup_text_emb = mashup_text_emb.to(device)
         api_text_emb = api_text_emb.to(device)
 
-        # 提取当前特征
         mashup_emb = self.mashup_emb.weight
         api_emb = self.api_emb.weight
 
-        # 【修复3】：恢复正确的 4 个参数传入 LightGCN
         g_mashup, g_api = self.lightgcn(adj_mashup, adj_api, mashup_emb, api_emb)
 
-        # 【修复4】：恢复正确的 ego_embeddings 进行交互图传播
         ego_embeddings = torch.cat([mashup_emb, api_emb], dim=0)
         inter_res = self.interaction_gcn_forward(interaction_adj, ego_embeddings)
         inter_m, inter_a = torch.split(inter_res, [mashup_emb.shape[0], api_emb.shape[0]])
-
-        # 第一次融合
+        
         g_fused_mashup = (g_mashup + inter_m) / 2.0
         g_fused_api = (g_api + inter_a) / 2.0
 
-        # 文本嵌入转换
         mashup_text_emb = self.text_mlp(mashup_text_emb)
         api_text_emb = self.text_mlp(api_text_emb)
 
         t_mashup = F.normalize(mashup_text_emb, p=2, dim=-1)
         t_api = F.normalize(api_text_emb, p=2, dim=-1)
 
-        # 多模态融合
         final_mashup = (g_fused_mashup + t_mashup) / 2.0
         final_api = (g_fused_api + t_api) / 2.0
 
@@ -168,19 +150,13 @@ class MUSCLE(nn.Module):
                 all_ndcg / test_uids.shape[0])
 
 
-
-# ------------------------- 损失函数 -------------------------
 def bpr_loss(pos_scores, neg_scores):
-    """基于相似性得分的BPR损失"""
     return -torch.log(torch.sigmoid(pos_scores - neg_scores)).mean()
-
-
 
 
 class TextualSimilarityLoss(nn.Module):
     def __init__(self, mashup_full_sim, api_full_sim, alpha1, alpha2, beta, lambda_tss):
         super().__init__()
-        # 修正张量创建方式，避免警告
         if isinstance(mashup_full_sim, torch.Tensor):
             self.mashup_sim = mashup_full_sim.clone().detach().to(device, dtype=torch.float32)
         else:
@@ -198,21 +174,17 @@ class TextualSimilarityLoss(nn.Module):
         self.to(device)
 
     def forward(self, e_m, e_a):
-        # 确保输入嵌入与损失计算在同一设备
         e_m = e_m.to(self.mashup_sim.device)
         e_a = e_a.to(self.api_sim.device)
 
-        # Mashup部分损失计算
         e_m_norm = F.normalize(e_m, p=2, dim=1)
         cos_m = torch.mm(e_m_norm, e_m_norm.T)
-        # 动态生成掩码，确保与相似矩阵同设备
         mask_m = (self.mashup_sim < self.alpha1) & (
             ~torch.eye(e_m.size(0), dtype=torch.bool, device=self.mashup_sim.device))
         sigma_alpha_m = F.relu(self.alpha1 - self.mashup_sim)
         sigma_cos_m = F.relu(cos_m)
         loss_mss = (sigma_alpha_m[mask_m] ** self.beta * sigma_cos_m[mask_m] ** (self.beta + 1)).sum()
 
-        # API部分损失计算
         e_a_norm = F.normalize(e_a, p=2, dim=1)
         cos_a = torch.mm(e_a_norm, e_a_norm.T)
         mask_a = (self.api_sim < self.alpha2) & (~torch.eye(e_a.size(0), dtype=torch.bool, device=self.api_sim.device))
@@ -223,32 +195,20 @@ class TextualSimilarityLoss(nn.Module):
         return self.lambda_tss * (loss_mss + loss_atss)
 
 
-# ------------------------- 工具函数 -------------------------
 def sparse_matrix_to_tensor(sparse_mat):
-    """将SciPy稀疏矩阵转换为PyTorch稀疏张量并放到全局设备"""
     sparse_mat = sparse_mat.tocoo()
     indices = torch.LongTensor(np.vstack((sparse_mat.row, sparse_mat.col))).to(device)
     values = torch.FloatTensor(sparse_mat.data).to(device)
     return torch.sparse_coo_tensor(indices, values, sparse_mat.shape, device=device)
 
-
-
 def cross_modal_contrastive_loss(graph_emb, text_emb, temperature=0.2):
-    """
-    跨模态对比学习 (InfoNCE Loss)
-    用于对齐 图融合Embedding 和 文本Embedding
-    """
-    # 确保L2归一化
     graph_emb = F.normalize(graph_emb, p=2, dim=1)
     text_emb = F.normalize(text_emb, p=2, dim=1)
 
-    # 计算相似度矩阵 (N, N)
     logits = torch.matmul(graph_emb, text_emb.T) / temperature
 
-    # 正样本对角线 (自己图特征与自己的文本特征互为正样本)
     labels = torch.arange(logits.size(0)).to(logits.device)
 
-    # 交叉熵损失 (同时优化 G->T 和 T->G 两个方向)
     loss_g2t = F.cross_entropy(logits, labels)
     loss_t2g = F.cross_entropy(logits.T, labels)
 
